@@ -1,0 +1,96 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress INFO and WARNING logs
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.callbacks import EarlyStopping
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(CURRENT_DIR)
+DATA_DIR = os.path.join(BASE_DIR, "data", "casting_data", "casting_data")
+TRAIN_DIR = os.path.join(DATA_DIR, "train")
+TEST_DIR = os.path.join(DATA_DIR, "test")
+MODEL_STORE_DIR = os.path.join(BASE_DIR, "model_store")
+
+# Hyperparameters
+IMG_SIZE = (224, 224) 
+BATCH_SIZE = 16
+EPOCHS = 5
+LEARNING_RATE = 1e-4
+
+def run_training_pipeline():
+    os.makedirs(MODEL_STORE_DIR, exist_ok=True)
+    
+    # Load Datasets
+    train_ds = tf.keras.utils.image_dataset_from_directory(
+        TRAIN_DIR, image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=True
+    )
+    test_ds = tf.keras.utils.image_dataset_from_directory(
+        TEST_DIR, image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=False
+    )
+    
+    # Optimize dataset performance for CPU execution
+    train_ds = train_ds.cache().prefetch(tf.data.AUTOTUNE)
+    test_ds = test_ds.cache().prefetch(tf.data.AUTOTUNE)
+    
+    # 1. Load the Pre-trained Base Model (Transfer Learning)
+    base_model = MobileNetV2(
+        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
+        include_top=False,  # Drop the original classification head
+        weights='imagenet'  # Load pre-trained weights
+    )
+    
+    # Freeze the base model weights so they aren't ruined during initial training
+    base_model.trainable = False
+    
+    # 2. Build the Model Architecture using Sequential API
+    model = models.Sequential([
+        layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3)),
+        
+        # Data Augmentation Layers
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.2),
+        layers.RandomContrast(0.1),
+        
+        # MobileNetV2 specific preprocessing (-1 to 1)
+        layers.Rescaling(1./127.5, offset=-1),
+        
+        # Pre-trained Feature Extractor Base
+        base_model,
+        
+        # Custom Classification Head for your casting problem
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(128, activation='relu'),
+        layers.Dropout(0.4),
+        layers.Dense(1, activation='sigmoid')
+    ])
+    
+    # Compile Model
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    # Early Stopping callback
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=5,
+        restore_best_weights=True
+    )
+    
+    # Train model
+    model.fit(
+        train_ds, 
+        validation_data=test_ds, 
+        epochs=EPOCHS,
+        callbacks=[early_stopping]
+    )
+    
+    # Save the updated model
+    model_path = os.path.join(MODEL_STORE_DIR, "casting_defect_transfer_model.keras")
+    model.save(model_path)
+    print(f"Transfer learning model saved to: {model_path}")
+
+if __name__ == "__main__":
+    run_training_pipeline()
